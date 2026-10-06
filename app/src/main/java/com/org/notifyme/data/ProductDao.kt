@@ -15,6 +15,9 @@ interface ProductDao {
     @Query("SELECT * FROM watched_products WHERE id = :id")
     suspend fun get(id: Long): WatchedProduct?
 
+    @Query("SELECT * FROM watched_products WHERE url = :url LIMIT 1")
+    suspend fun getByUrl(url: String): WatchedProduct?
+
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insert(p: WatchedProduct): Long   // -1 if duplicate url
 

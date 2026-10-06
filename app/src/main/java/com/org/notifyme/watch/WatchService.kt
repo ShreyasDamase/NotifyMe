@@ -65,6 +65,7 @@ class WatchService : Service() {
     private suspend fun runWatch(hours: Int) {
         val repo = app.container.repository
         val gate = app.container.hostGate
+        val wallClockEnd = System.currentTimeMillis() + hours * 3_600_000L
         val deadline = SystemClock.elapsedRealtime() + hours * 3_600_000L
         val pm = getSystemService(PowerManager::class.java)
 
@@ -75,13 +76,14 @@ class WatchService : Service() {
             if (!isOnline()) { delay(60_000); continue }
 
             val host = items.firstOrNull()?.url?.toUri()?.host ?: "host"
-            val perHost = items.groupBy { it.url.toUri().host }.maxOf { it.value.size }
-            val intervalSec = Plan.effectiveIntervalSec(perHost, Limits.INTERVAL_DEFAULT_SEC)
+            val maxItemsOnOneHost = items.groupBy { it.url.toUri().host }.maxOf { it.value.size }
+            val intervalSec = Plan.effectiveIntervalSec(maxItemsOnOneHost, Limits.INTERVAL_DEFAULT_SEC)
             val gapMs = intervalSec * 1000L / maxOf(1, items.size)
-            val finishTime = DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(deadline))
+            val finishTime = DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(wallClockEnd))
             val reqCount = gate.requestCountThisHour(host)
 
-            val stat = "Watching ${items.size} items · every ~${intervalSec / 60} min · until $finishTime ($host: $reqCount/60 req)"
+            val raisedNote = if (intervalSec > Limits.INTERVAL_DEFAULT_SEC) " (raised to ${intervalSec / 60} min to stay under 60 req/h)" else ""
+            val stat = "Watching ${items.size} items · every ~${intervalSec / 60} min · until $finishTime$raisedNote ($host: $reqCount/60 req)"
             _watchState.value = stat
             updateOngoing(stat)
 

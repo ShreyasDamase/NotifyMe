@@ -17,13 +17,8 @@ import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import com.org.notifyme.alarm.AlarmActivity
 import com.org.notifyme.data.WatchedProduct
-import java.text.DateFormat
-import java.util.Date
-import java.util.concurrent.ConcurrentHashMap
 
 class Notifier(private val ctx: Context) {
-
-    private val announcedPauses = ConcurrentHashMap<String, Long>()
 
     fun ensureChannels() {
         val nm = ctx.getSystemService(NotificationManager::class.java) ?: return
@@ -35,13 +30,23 @@ class Notifier(private val ctx: Context) {
 
         nm.createNotificationChannel(NotificationChannel(CH_URGENT, "URGENT: back in stock", NotificationManager.IMPORTANCE_HIGH).apply {
             setSound(alarmUri, attrs)
-            enableVibration(true); vibrationPattern = longArrayOf(0, 800, 300, 800, 300, 800)
+            enableVibration(true)
+            // A sustained alert (about 16 seconds) so a restock is harder to miss.
+            vibrationPattern = longArrayOf(
+                0, 1_000, 350, 1_000, 350, 1_000, 350,
+                1_000, 350, 1_000, 350, 1_000, 350,
+                1_000, 350, 1_000, 350, 1_000, 350,
+                1_000, 350, 1_000, 350, 1_000,
+            )
             lockscreenVisibility = Notification.VISIBILITY_PUBLIC
             setBypassDnd(true)
         })
         nm.createNotificationChannel(NotificationChannel(CH_WATCH, "Watching", NotificationManager.IMPORTANCE_LOW))
-        nm.createNotificationChannel(NotificationChannel(CH_INFO, "Status", NotificationManager.IMPORTANCE_LOW))
     }
+
+    fun hasDndAccess(): Boolean =
+        android.os.Build.VERSION.SDK_INT < 23 ||
+            (ctx.getSystemService(NotificationManager::class.java)?.isNotificationPolicyAccessGranted == true)
 
     @SuppressLint("MissingPermission")
     fun notifyUrgent(p: WatchedProduct) {
@@ -69,34 +74,13 @@ class Notifier(private val ctx: Context) {
         NotificationManagerCompat.from(ctx).notify(p.id.toInt(), n)
     }
 
-    fun notifyWatchStopped(reason: String) = postInfo(2001, "Urgent watch stopped", reason)
-
-    fun notifyHostPaused(host: String, untilMs: Long) {
-        val lastAnnounced = announcedPauses[host] ?: 0L
-        if (untilMs > lastAnnounced) {
-            announcedPauses[host] = untilMs
-            val timeStr = DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(untilMs))
-            postInfo(2002 + host.hashCode(), "$host is rate-limiting", "Paused until $timeStr")
-        }
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun postInfo(id: Int, title: String, text: String) {
-        if (android.os.Build.VERSION.SDK_INT >= 33 &&
-            ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
-        val n = NotificationCompat.Builder(ctx, CH_INFO)
-            .setSmallIcon(android.R.drawable.stat_notify_more)
-            .setContentTitle(title)
-            .setContentText(text)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setAutoCancel(true)
-            .build()
-        NotificationManagerCompat.from(ctx).notify(id, n)
+    fun notifyWatchStopped(reason: String) {
+        // Handled silently or in-app; do not spam push notifications
     }
 
     companion object {
-        const val CH_URGENT = "stock_urgent"
+        // A new ID is required so Android applies the updated vibration pattern to existing installs.
+        const val CH_URGENT = "stock_urgent_v2"
         const val CH_WATCH = "stock_watch"
-        const val CH_INFO = "stock_info"
     }
 }

@@ -18,8 +18,12 @@ import java.util.Date
 data class UiState(val checking: Boolean = false, val message: String? = null)
 
 class MainViewModel(private val repo: ProductRepository, private val app: StockPingApp) : ViewModel() {
+    private val _productsLoaded = MutableStateFlow(false)
+    val productsLoaded: StateFlow<Boolean> = _productsLoaded.asStateFlow()
     val products: StateFlow<List<WatchedProduct>> =
-        repo.observeAll().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+        repo.observeAll()
+            .onEach { _productsLoaded.value = true }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     private val _ui = MutableStateFlow(UiState())
     val ui: StateFlow<UiState> = _ui
@@ -55,6 +59,16 @@ class MainViewModel(private val repo: ProductRepository, private val app: StockP
             AddResult.ADDED -> "Added"
             AddResult.DUPLICATE -> "Already watching this product"
             AddResult.INVALID -> "No valid link found"
+            AddResult.AMAZON_UNSUPPORTED ->
+                "Amazon links aren't supported: Amazon's Product Advertising API data can't be used in mobile apps."
+            AddResult.FLIPKART_NEEDS_API ->
+                "Notify couldn't read stock from this Flipkart page. Reliable tracking needs Flipkart Affiliate API credentials."
+            AddResult.UNREADABLE ->
+                "This page doesn't expose stock status Notify can read, so it wasn't added. The store may need its own integration."
+            AddResult.CHECK_FAILED ->
+                "Couldn't reach this store. Check the link and connection, then try again."
+            AddResult.HOST_PAUSED ->
+                "This store is temporarily rate-limiting checks. Try adding this link again later."
         }
         _ui.update { UiState(checking = false, message = msg) }
     }

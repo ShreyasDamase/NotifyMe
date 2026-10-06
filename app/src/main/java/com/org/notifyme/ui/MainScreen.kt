@@ -3,24 +3,42 @@ package com.org.notifyme.ui
 import android.content.Intent
 import android.provider.Settings
 import android.text.format.DateUtils
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.State
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
+import com.org.notifyme.StockPingApp
 import com.org.notifyme.data.StockStatus
 import com.org.notifyme.data.WatchedProduct
 import com.org.notifyme.watch.WatchService
@@ -29,16 +47,47 @@ import com.org.notifyme.watch.WatchService
 @Composable
 fun MainScreen(vm: MainViewModel) {
     val products by vm.products.collectAsStateWithLifecycle()
+    val productsLoaded by vm.productsLoaded.collectAsStateWithLifecycle()
+    val shimmerProgress = if (!productsLoaded) {
+        val transition = rememberInfiniteTransition(label = "product-shimmer")
+        transition.animateFloat(
+            initialValue = 0f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 1_250, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart,
+            ),
+            label = "shimmer-progress",
+        )
+    } else null
     val ui by vm.ui.collectAsStateWithLifecycle()
     val watchState by vm.watchState.collectAsStateWithLifecycle()
     val pausedBanner by vm.pausedBanner.collectAsStateWithLifecycle()
     val ctx = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val notifier = remember(ctx) { (ctx.applicationContext as StockPingApp).container.notifier }
+    var dndAccess by remember { mutableStateOf(notifier.hasDndAccess()) }
     val snackbar = remember { SnackbarHostState() }
     var showAdd by remember { mutableStateOf(false) }
     var selectedHours by remember { mutableStateOf(2) }
 
     LaunchedEffect(ui.message) {
-        ui.message?.let { snackbar.showSnackbar(it); vm.messageShown() }
+        ui.message?.let {
+            snackbar.showSnackbar(it, duration = SnackbarDuration.Long)
+            vm.messageShown()
+        }
+    }
+
+    DisposableEffect(lifecycleOwner, notifier) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                dndAccess = notifier.hasDndAccess()
+                // Recreate the channel after special access is granted so Android can apply DND bypass.
+                notifier.ensureChannels()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     Scaffold(
@@ -46,6 +95,7 @@ fun MainScreen(vm: MainViewModel) {
             TopAppBar(
                 title = { Text("StockPing") },
                 actions = {
+                    // Debug-only test alert button (Item 6)
                     IconButton(onClick = { vm.testAlert() }) {
                         Icon(Icons.Default.NotificationsActive, "Test Alarm")
                     }
@@ -63,106 +113,196 @@ fun MainScreen(vm: MainViewModel) {
         },
         snackbarHost = { SnackbarHost(snackbar) },
     ) { pad ->
-        Column(Modifier.padding(pad)) {
-            if (ui.checking) LinearProgressIndicator(Modifier.fillMaxWidth())
-
-            // Paused Host Red Banner (Requirement 2)
-            pausedBanner?.let { bannerText ->
-                Surface(
-                    color = MaterialTheme.colorScheme.errorContainer,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        text = bannerText,
-                        color = MaterialTheme.colorScheme.onErrorContainer,
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.padding(12.dp),
-                        textAlign = TextAlign.Center
-                    )
-                }
+        val openAlertSettings = {
+            val action = if (!dndAccess) Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS
+                else Settings.ACTION_APP_NOTIFICATION_SETTINGS
+            val settings = Intent(action).apply {
+                if (dndAccess) putExtra(Settings.EXTRA_APP_PACKAGE, ctx.packageName)
             }
-            
-            // Urgent Watch Control Card (Requirement 5)
-            Card(
-                modifier = Modifier.fillMaxWidth().padding(16.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Column(modifier = Modifier.fillMaxWidth()) {
-                        Text("Urgent Mode", style = MaterialTheme.typography.titleMedium)
+            ctx.startActivity(settings)
+        }
+
+        LazyColumn(
+            modifier = Modifier.fillMaxSize().padding(pad),
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            if (ui.checking) {
+                item(key = "checking") { LinearProgressIndicator(Modifier.fillMaxWidth()) }
+            }
+            pausedBanner?.let { bannerText ->
+                item(key = "paused-banner") {
+                    Surface(
+                        color = MaterialTheme.colorScheme.errorContainer,
+                        shape = MaterialTheme.shapes.medium,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
                         Text(
-                            text = watchState ?: "Aggressive polling & alarm alerts",
+                            text = bannerText,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
                             style = MaterialTheme.typography.bodySmall,
-                            color = if (watchState != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            textAlign = TextAlign.Center,
                         )
                     }
-                    Spacer(Modifier.height(12.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            listOf(1, 2, 4, 8).forEach { h ->
-                                FilterChip(
-                                    selected = selectedHours == h,
-                                    onClick = { selectedHours = h },
-                                    label = { Text("${h}h") },
-                                    enabled = !WatchService.isRunning
-                                )
-                            }
-                        }
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.End,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Button(
-                            onClick = { vm.startUrgentWatch(ctx, selectedHours) },
-                            enabled = !WatchService.isRunning
-                        ) {
-                            Text("Start (${selectedHours}h)")
-                        }
-                        Spacer(Modifier.width(8.dp))
-                        OutlinedButton(
-                            onClick = { vm.stopUrgentWatch(ctx) },
-                            enabled = WatchService.isRunning
-                        ) {
-                            Text("Stop")
-                        }
-                    }
                 }
             }
+            item(key = "urgent-controls") {
+                UrgentWatchCard(
+                    isRunning = WatchService.isRunning || watchState != null,
+                    selectedHours = selectedHours,
+                    dndAccess = dndAccess,
+                    onSelectHours = { selectedHours = it },
+                    onAlertSettings = openAlertSettings,
+                    onStart = { vm.startUrgentWatch(ctx, selectedHours) },
+                    onStop = { vm.stopUrgentWatch(ctx) },
+                )
+            }
 
-            if (products.isEmpty()) {
-                Box(Modifier.fillMaxSize(), Alignment.Center) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("No products watched yet.", style = MaterialTheme.typography.bodyLarge)
-                        Spacer(Modifier.height(8.dp))
-                        Button(onClick = {
-                            vm.add("https://robu.in/product/n25-6v-115rpm-metal-gear-motor-with-encoder-d-type/")
-                        }) {
-                            Text("Add Robu Test Product")
-                        }
-                    }
+            when {
+                !productsLoaded -> items(5, key = { "loading-$it" }) {
+                    ShimmerProductCard(shimmerProgress!!)
                 }
-            } else {
-                LazyColumn(
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    items(products, key = { it.id }) { p -> ProductCard(p, vm) }
+                products.isEmpty() -> item(key = "empty-products") {
+                    EmptyProductsCard(onAddExample = {
+                        vm.add("https://robu.in/product/n25-6v-115rpm-metal-gear-motor-with-encoder-d-type/")
+                    })
                 }
+                else -> items(products, key = { "product-${it.id}" }) { p -> ProductCard(p, vm) }
             }
         }
     }
 
     if (showAdd) AddDialog(onDismiss = { showAdd = false }, onAdd = { vm.add(it); showAdd = false })
+}
+
+@Composable
+private fun UrgentWatchCard(
+    isRunning: Boolean,
+    selectedHours: Int,
+    dndAccess: Boolean,
+    onSelectHours: (Int) -> Unit,
+    onAlertSettings: () -> Unit,
+    onStart: () -> Unit,
+    onStop: () -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+    ) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Urgent mode", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        text = if (dndAccess) "DND bypass on · alarm + long vibration" else "DND bypass not set up",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (dndAccess) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                TextButton(onClick = onAlertSettings, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
+                    Text(if (dndAccess) "Alert settings" else "Set up alerts")
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                listOf(1, 2, 4, 8).forEach { hours ->
+                    FilterChip(
+                        selected = selectedHours == hours,
+                        onClick = { onSelectHours(hours) },
+                        enabled = !isRunning,
+                        label = { Text("${hours}h") },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = if (isRunning) "Watching in background" else "Fast stock checks",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                )
+                if (isRunning) {
+                    OutlinedButton(onClick = onStop, contentPadding = PaddingValues(horizontal = 20.dp, vertical = 4.dp)) {
+                        Text("Stop")
+                    }
+                } else {
+                    Button(onClick = onStart, contentPadding = PaddingValues(horizontal = 20.dp, vertical = 4.dp)) {
+                        Text("Start · ${selectedHours}h")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EmptyProductsCard(onAddExample: () -> Unit) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(
+            Modifier.fillMaxWidth().padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("No products watched yet.", style = MaterialTheme.typography.bodyLarge)
+            Button(onClick = onAddExample) { Text("Add Robu test product") }
+        }
+    }
+}
+
+@Composable
+private fun ShimmerProductCard(progress: State<Float>) {
+    val base = MaterialTheme.colorScheme.surfaceVariant
+    val highlight = MaterialTheme.colorScheme.surface.copy(alpha = 0.62f)
+    val shape = RoundedCornerShape(8.dp)
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+    ) {
+        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            ShimmerBlock(Modifier.size(64.dp), progress, base, highlight, RoundedCornerShape(12.dp))
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                ShimmerBlock(Modifier.fillMaxWidth(0.92f).height(16.dp), progress, base, highlight, shape)
+                ShimmerBlock(Modifier.fillMaxWidth(0.7f).height(14.dp), progress, base, highlight, shape)
+                ShimmerBlock(Modifier.width(104.dp).height(24.dp), progress, base, highlight, RoundedCornerShape(50))
+                ShimmerBlock(Modifier.width(132.dp).height(11.dp), progress, base, highlight, shape)
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(verticalArrangement = Arrangement.spacedBy(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                ShimmerBlock(Modifier.width(42.dp).height(24.dp), progress, base, highlight, RoundedCornerShape(50))
+                ShimmerBlock(Modifier.size(20.dp), progress, base, highlight, RoundedCornerShape(4.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun ShimmerBlock(
+    modifier: Modifier,
+    progress: State<Float>,
+    base: androidx.compose.ui.graphics.Color,
+    highlight: androidx.compose.ui.graphics.Color,
+    shape: Shape,
+) {
+    val shimmer = remember(highlight) {
+        Brush.horizontalGradient(listOf(androidx.compose.ui.graphics.Color.Transparent, highlight, androidx.compose.ui.graphics.Color.Transparent))
+    }
+    BoxWithConstraints(modifier.clip(shape).background(base)) {
+        val width = maxWidth
+        Box(
+            Modifier
+                .fillMaxHeight()
+                .fillMaxWidth(0.65f)
+                .graphicsLayer {
+                    translationX = width.toPx() * progress.value - size.width
+                }
+                .background(shimmer),
+        )
+    }
 }
 
 @Composable
@@ -187,7 +327,6 @@ private fun ProductCard(p: WatchedProduct, vm: MainViewModel) {
                     p.lastCheckedAt?.let { "Checked " + DateUtils.getRelativeTimeSpanString(it) } ?: "Not checked yet",
                     style = MaterialTheme.typography.labelSmall,
                 )
-                // Requirement 3: HostBusy must not set lastError or change lastStatus. Cards show nothing for it.
                 p.lastError?.let {
                     if (!it.contains("Paused until")) {
                         Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)

@@ -1,5 +1,6 @@
 package com.org.notifyme.net
 
+import android.util.Log
 import com.org.notifyme.data.StockStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -79,10 +80,15 @@ class StockChecker(private val client: OkHttpClient, private val gate: HostGate)
         val name = doc.selectFirst("h1.product_title")?.text()
             ?: doc.selectFirst("meta[property=og:title]")?.attr("content")
         val image = doc.selectFirst("meta[property=og:image]")?.attr("content")?.ifBlank { null }
+        
         val amount = doc.selectFirst("meta[property=product:price:amount]")?.attr("content")
+            ?: doc.selectFirst(".price ins .amount, .price .amount, .woocommerce-Price-amount, bdi")?.text()
         val cur = doc.selectFirst("meta[property=product:price:currency]")?.attr("content")
-        val price = amount?.let { if (cur.isNullOrBlank()) it else "$it $cur" }
-            ?: doc.selectFirst("p.price .woocommerce-Price-amount")?.text()
+        val price = amount?.let { 
+            if (cur.isNullOrBlank()) {
+                if (it.contains("₹") || it.contains("$") || it.contains("€") || it.contains("£") || it.contains("Rs")) it else "₹$it"
+            } else "$cur $it"
+        } ?: doc.selectFirst("p.price")?.text()?.ifBlank { null }
 
         return CheckResult(status, name, image, price, source)
     }
@@ -122,18 +128,22 @@ class StockChecker(private val client: OkHttpClient, private val gate: HostGate)
         val allowed = gate.allowedAt(host)
         if (allowed > System.currentTimeMillis()) throw HostBusy(host, allowed)
         gate.recordRequest(host)
+        val count = gate.requestCountThisHour(host)
+        Log.d("StockPing", "GET $url -> host=$host, requests this hour: $count/60")
 
         val b = Request.Builder().url(url).header("User-Agent", UA).header("Accept-Language", "en-IN,en;q=0.9")
         etags[url]?.let { b.header("If-None-Match", it) }
         try {
             client.newCall(b.build()).execute().use { r ->
                 gate.recordOutcome(host, r.code, r.header("Retry-After")?.toLongOrNull()?.times(1000))
+                Log.d("StockPing", "RESP $url -> code=${r.code}")
                 if (r.code == 304) return null
                 if (!r.isSuccessful) error("HTTP ${r.code}")
                 r.header("ETag")?.let { etags[url] = it }
                 return r.peekBody(Limits.MAX_BODY_BYTES).string()
             }
         } catch (e: java.io.IOException) {
+            Log.e("StockPing", "IO Error on $url: ${e.message}")
             gate.recordOutcome(host, null, null); throw e
         }
     }
